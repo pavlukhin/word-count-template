@@ -4,7 +4,6 @@ import org.apache.ignite.Ignite;
 import org.apache.ignite.IgniteCache;
 import org.apache.ignite.IgniteDataStreamer;
 import org.apache.ignite.configuration.CacheConfiguration;
-import org.apache.ignite.lang.IgniteBiTuple;
 import org.apache.ignite.lang.IgniteCallable;
 import org.apache.ignite.resources.IgniteInstanceResource;
 
@@ -14,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 
 public class NaiveBayes {
@@ -27,7 +25,7 @@ public class NaiveBayes {
 
             // Load data
             try (IgniteDataStreamer<Integer, Mail> dataStreamer = client.dataStreamer(MAILS);
-                 BufferedReader reader = Files.newBufferedReader(Paths.get("iris.csv"))) {
+                 BufferedReader reader = Files.newBufferedReader(Paths.get("messages.txt"))) {
                 int i = 0;
                 String line;
                 while ((line = reader.readLine()) != null) {
@@ -37,75 +35,80 @@ public class NaiveBayes {
                 }
             }
 
-            IgniteCallable<IgniteBiTuple<Map<String, Integer>, Map<String, Integer>>> callable = new IgniteCallable<IgniteBiTuple<Map<String, Integer>, Map<String, Integer>>>() {
+            IgniteCallable<MailStatistics> callable = new IgniteCallable<MailStatistics>() {
                 @IgniteInstanceResource
                 private Ignite localIgnite;
 
                 @Override
-                public IgniteBiTuple<Map<String, Integer>, Map<String, Integer>> call() throws Exception {
+                public MailStatistics call() throws Exception {
                     HashMap<String, Integer> spamMap = new HashMap<>();
                     HashMap<String, Integer> nonSpamMap = new HashMap<>();
 
                     IgniteCache<Integer, Mail> cache = localIgnite.cache(MAILS);
+                    int spamMessageCount = 0;
+                    int nonSpamMessageCount = 0;
 
                     for (Cache.Entry<Integer, Mail> entry : cache.localEntries()) {
                         Mail mail = entry.getValue();
                         for (String word : mail.text.split("\\s+")) {
-                            HashSet<String> spamWords = new HashSet<>();
-                            HashSet<String> nonSpamWords = new HashSet<>();
-
-                            if (mail.isSpam && !spamWords.contains(word)) {
-                                spamWords.add(word);
-
+                            if (mail.isSpam) {
                                 spamMap.merge(word, 1, Integer::sum);
+
+                                spamMessageCount++;
                             }
 
-                            if (!mail.isSpam && !nonSpamWords.contains(word)) {
-                                nonSpamWords.add(word);
-
+                            if (!mail.isSpam) {
                                 nonSpamMap.merge(word, 1, Integer::sum);
+
+                                nonSpamMessageCount++;
                             }
                         }
                     }
 
-                    return new IgniteBiTuple<>(spamMap, nonSpamMap);
+                    return new MailStatistics(spamMap, nonSpamMap, spamMessageCount, nonSpamMessageCount);
                 }
             };
 
-            Collection<IgniteBiTuple<Map<String, Integer>, Map<String, Integer>>> pieces = client.compute().broadcast(callable);
+            Collection<MailStatistics> pieces = client.compute().broadcast(callable);
 
             System.out.println("Reduce " + pieces.size() + " pieces");
 
             HashMap<String, Integer> spamMap = new HashMap<>();
             HashMap<String, Integer> nonSpamMap = new HashMap<>();
-            int spamSum = 0;
-            int nonSpamSum = 0;
+            int wordsInSpam = 0;
+            int wordsInNonSpam = 0;
+            int spamMessagesCount = 0;
+            int nonSpamMessagesCount = 0;
+            int totalMessagesCount;
 
-            for (IgniteBiTuple<Map<String, Integer>, Map<String, Integer>> piece : pieces) {
-                Map<String, Integer> partialSpamMap = piece.get1();
-                Map<String, Integer> partialNonSpamMap = piece.get2();
+            for (MailStatistics piece : pieces) {
+                spamMessagesCount += piece.spamMessageCount;
+                nonSpamMessagesCount += piece.nonSpamMessageCount;
+
+                Map<String, Integer> partialSpamMap = piece.spamWordCount;;
 
                 for (Map.Entry<String, Integer> entry : partialSpamMap.entrySet()) {
                     String word = entry.getKey();
-                    Integer documents = entry.getValue();
+                    Integer count = entry.getValue();
 
-                    spamMap.merge(word, documents, Integer::sum);
+                    spamMap.merge(word, count, Integer::sum);
 
-                    spamSum += documents;
+                    wordsInSpam += count;
                 }
+
+                Map<String, Integer> partialNonSpamMap = piece.nonSpamWordCount;
 
                 for (Map.Entry<String, Integer> entry : partialNonSpamMap.entrySet()) {
                     String word = entry.getKey();
-                    Integer documents = entry.getValue();
+                    Integer count = entry.getValue();
 
-                    nonSpamMap.merge(word, documents, Integer::sum);
+                    nonSpamMap.merge(word, count, Integer::sum);
 
-                    nonSpamSum += documents;
+                    wordsInNonSpam += count;
                 }
             }
 
-            HashMap<String, Float> spamProbabilityMap = new HashMap<>();
-            HashMap<String, Float> nonSpamProbabilityMap = new HashMap<>();
+            totalMessagesCount = spamMessagesCount + nonSpamMessagesCount;
         }
     }
 
@@ -120,6 +123,20 @@ public class NaiveBayes {
         public Mail(String text, boolean isSpam) {
             this.text = text;
             this.isSpam = isSpam;
+        }
+    }
+
+    public static class MailStatistics {
+        final Map<String, Integer> spamWordCount;
+        final Map<String, Integer> nonSpamWordCount;
+        final int spamMessageCount;
+        final int nonSpamMessageCount;
+
+        public MailStatistics(Map<String, Integer> spamWordCount, Map<String, Integer> nonSpamWordCount, int spamMessageCount, int nonSpamMessageCount) {
+            this.spamWordCount = spamWordCount;
+            this.nonSpamWordCount = nonSpamWordCount;
+            this.spamMessageCount = spamMessageCount;
+            this.nonSpamMessageCount = nonSpamMessageCount;
         }
     }
 }
